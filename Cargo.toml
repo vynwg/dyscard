@@ -1,0 +1,27 @@
+[package]
+name = "dyscards"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies.axum]
+version = "0.8.8"
+default-features = false
+features = ["http1", "json", "query", "tokio"]
+
+[dependencies.piet]
+version = "0.8.0"
+default-features = false
+features = ["webp", "gif", "tiff"]
+
+[dependencies.dotenvy]
+git = "https://github.com/allan2/dotenvy"
+features = ["macros"]
+
+[dependencies.tokio]
+version = "1.50.0"
+features = ["full"]
+
+[dependencies]
+matroska-demuxer = "0.7.0"
+reqwest = "0.13.2"
+piet-cairo = "0.8.0"
