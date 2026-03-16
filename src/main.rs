@@ -6,6 +6,18 @@ use tokio;
 
 use std::env;
 
+struct Config {
+    lanyard_api: String
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            lanyard_api: env::var("LANYARD_API").expect("Missign API URL")
+        }
+    }
+}
+
 
 #[dotenvy::load(path = "./.env", required = false, override_ = false)]
 #[tokio::main]
@@ -14,10 +26,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let port = env::var("PORT").unwrap_or("3000".to_owned());
     let addr = format!("{}:{}", host, port);
 
-    let api = env::var("LANYARD_API").expect("Missign API URL");
+    let config = Config::default();
 
     let app = Router::new()
-        .route("/{id}.{ext}", get(card));
+        .route("/{id}.png", get(card_png))
+        .layer(Extension(config));
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await?;
@@ -25,6 +38,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn card() {
+async fn card_png(Path(id): Path<u32>) {
 
 }
