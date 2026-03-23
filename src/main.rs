@@ -1,23 +1,38 @@
-use axum::routing::post;
-use axum::routing::get;
-use axum::Extension;
-use axum::Router;
+use png::ColorType;
+use axum::response::Response;
+use std::io::Cursor;
 use axum::response::IntoResponse;
+use axum::body::Body;
+use axum::extract::State;
+use piet::ImageBuf;
+use piet::RenderContext;
+use piet::ImageFormat;
+use piet::InterpolationMode;
+use axum::routing::get;
+use axum::Router;
+use std::collections::HashMap;
 use axum::extract::Path;
+use axum::http::{StatusCode, header, HeaderName};
 use reqwest;
+use serde::Deserialize;
 use tokio;
-
 use std::env;
+use piet::kurbo::Rect;
+use piet_common::Device;
+use tokio_util::io::ReaderStream;
+use png;
 
 #[derive(Clone)]
 struct Config {
-    lanyard_api: String
+    lanyard_api: String,
+    discord_cdn: String,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
-            lanyard_api: env::var("LANYARD_API").expect("Missign API URL")
+            lanyard_api: env::var("LANYARD_API").expect("Missign API URL"),
+            discord_cdn: env::var("DISCORD_CDN").expect("Missign API URL"),
         }
     }
 }
@@ -34,127 +49,150 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = Router::new()
         .route("/{id}", get(card_png))
-        .layer(Extension(config));
+        .with_state(config);
 
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
 
     Ok(())
 }
 
+#[derive(Deserialize, Debug)]
 struct User {
-    success: bool,
-    data: UserData
+    data: Option<UserData>,
 }
 
+#[derive(Deserialize, Debug)]
 struct Timestamp {
-    start: u64,
-    end: u64
+    start: Option<u64>,
+    end: Option<u64>,
 }
 
+#[derive(Deserialize, Debug)]
 struct Spotify {
     track_id: String,
     timestamps: Timestamp,
     song: String,
     artist: String,
     album_art_url: String,
-    album: String
+    album: String,
 }
 
+#[derive(Deserialize, Debug)]
 struct DiscordUser {
     username: String,
-    public_flags: u32,
-    id: String,
-    discriminator: String,
-    avatar: String
+    avatar: String,
+    global_name: String,
 }
 
+#[derive(Deserialize, Debug)]
+struct Emoji {
+    name: String,
+    id: Option<String>,
+    #[serde(default)]
+    animated: bool,
+}
+
+#[derive(Deserialize, Debug)]
+struct Assets {
+    large_image: Option<String>,
+    large_text: Option<String>,
+    small_image: Option<String>,
+    small_text: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
 struct Activity {
-    type: u8,
-    timestamps: Timestampm,
-    sync_id: String,
-    "state": "Ark Patrol; Veronika Redd",
-        "session_id": "140ecdfb976bdbf29d4452d492e551c7",
-        "party": {
-          "id": "spotify:94490510688792576"
-        },
-        "name": "Spotify",
-        "id": "spotify:1",
-        "flags": 48,
-        "details": "Let Go",
-        "created_at": 1615529838051,
-        "assets": {
-          "large_text": "Let Go",
-          "large_image": "spotify:ab67616d0000b27364840995fe43bb2ec73a241d"
-        }
+    name: String,
+    r#type: u8,
+    created_at: u64,
+    timestamps: Option<Timestamp>,
+    #[serde(default)]
+    application_id: String,
+    #[serde(default)]
+    details: String,
+    #[serde(default)]
+    state: String,
+    emoji: Option<Emoji>,
+    assets: Option<Assets>,
 }
 
+#[derive(Deserialize, Debug)]
 struct UserData {
+    active_on_discord_web: bool,
     active_on_discord_mobile: bool,
     active_on_discord_desktop: bool,
+    active_on_discord_embedded: bool,
+    active_on_discord_vr: bool,
     listening_to_spotify: bool,
     kv: HashMap<String, String>,
-    spotify: Spotify,
+    spotify: Option<Spotify>,
     discord_user: DiscordUser,
+    #[serde(default)]
     discord_status: String,
-    activities: Vec<Activity>
-    [
-      {
-        "type": 2,
-        "timestamps": {
-          "start": 1615529820677,
-          "end": 1615530068733
-        },
-        "sync_id": "3kdlVcMVsSkbsUy8eQcBjI",
-        "state": "Ark Patrol; Veronika Redd",
-        "session_id": "140ecdfb976bdbf29d4452d492e551c7",
-        "party": {
-          "id": "spotify:94490510688792576"
-        },
-        "name": "Spotify",
-        "id": "spotify:1",
-        "flags": 48,
-        "details": "Let Go",
-        "created_at": 1615529838051,
-        "assets": {
-          "large_text": "Let Go",
-          "large_image": "spotify:ab67616d0000b27364840995fe43bb2ec73a241d"
-        }
-      },
-      {
-        "type": 0,
-        "timestamps": {
-          "start": 1615438153941
-        },
-        "state": "Workspace: lanyard",
-        "name": "Visual Studio Code",
-        "id": "66b84f5317e9de6c",
-        "details": "Editing README.md",
-        "created_at": 1615529838050,
-        "assets": {
-          "small_text": "Visual Studio Code",
-          "small_image": "565945770067623946",
-          "large_text": "Editing a MARKDOWN file",
-          "large_image": "565945077491433494"
-        },
-        "application_id": "383226320970055681"
-      }
-    ]
-  }
+    activities: Vec<Activity>,
 }
 
-async fn card_png(
-    Path(id): Path<String>,
-    Extension(cfg): Extension<Config>
-) -> impl IntoResponse {
-    let url = format!("{}/users/{}", cfg.lanyard_api, id);
 
-    let res = reqwest::get(url)
+async fn card_png(
+    cfg: State<Config>,
+    Path(id): Path<String>
+) -> Response {
+    let user: User = reqwest::get(
+            format!("{}/users/{}", cfg.lanyard_api, id)
+        )
         .await
         .unwrap() // TODO error handling
-        .text()
+        .json()
         .await
         .unwrap();
 
-    println!("{:?}", res);
+    let Some(user) = user.data else {
+        return (StatusCode::NOT_FOUND).into_response();
+    };
+
+    let DiscordUser {
+        username,
+        avatar,
+        global_name
+    } = user.discord_user;
+
+    let avatar = reqwest::get(
+            format!("{}/avatars/{}/{}.webp?size=64", cfg.discord_cdn, id, avatar)
+        )
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+
+    let mut device = Device::new().unwrap();
+    let mut target = device.bitmap_target(1024, 1024, 1.0).unwrap();
+    let mut ctx = target.render_context();
+
+    let buf = ImageBuf::from_data(&avatar).unwrap();
+    let img = buf.to_image(&mut ctx);
+    ctx.draw_image(&img, Rect::new(0.0, 0.0, 1024.0, 1024.0), InterpolationMode::Bilinear);
+    
+    ctx.finish().unwrap();
+    let img = target.to_image_buf(ImageFormat::RgbaPremul).unwrap();
+    let mut cursor = Cursor::new(img.raw_pixels().to_vec());
+
+    let mut data = vec![0; img.width() * img.height() * 4];
+    target.copy_raw_pixels(ImageFormat::RgbaPremul, &mut data).unwrap();
+    piet::util::unpremultiply_rgba(&mut data);
+    let mut encoder = png::Encoder::new(&mut cursor, img.width() as u32, img.height() as u32);
+    encoder.set_color(ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .write_header()
+        .unwrap()
+        .write_image_data(&data)
+        .unwrap();
+
+    let headers = [
+        (header::CONTENT_TYPE, "image/png"),
+    ];
+
+    (headers, cursor.into_inner()).into_response()
 }
