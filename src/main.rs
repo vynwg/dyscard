@@ -4,10 +4,10 @@ use std::io::Cursor;
 use axum::response::IntoResponse;
 use axum::body::Body;
 use axum::extract::State;
-use piet::ImageBuf;
-use piet::RenderContext;
-use piet::ImageFormat;
-use piet::InterpolationMode;
+use piet_common::ImageBuf;
+use piet_common::RenderContext;
+use piet_common::ImageFormat;
+use piet_common::InterpolationMode;
 use axum::routing::get;
 use axum::Router;
 use std::collections::HashMap;
@@ -17,9 +17,8 @@ use reqwest;
 use serde::Deserialize;
 use tokio;
 use std::env;
-use piet::kurbo::Rect;
+use piet_common::kurbo::Rect;
 use piet_common::Device;
-use tokio_util::io::ReaderStream;
 use png;
 
 #[derive(Clone)]
@@ -31,14 +30,13 @@ struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            lanyard_api: env::var("LANYARD_API").expect("Missign API URL"),
-            discord_cdn: env::var("DISCORD_CDN").expect("Missign API URL"),
+            lanyard_api: env::var("LANYARD_API").unwrap_or("https://lanyard.vynwg.com/v1".to_owned()),
+            discord_cdn: env::var("DISCORD_CDN").unwrap_or("https://cdn.discordapp.com".to_owned()),
         }
     }
 }
 
 
-#[dotenvy::load(path = "./.env", required = false, override_ = false)]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let host = env::var("HOST").unwrap_or("0.0.0.0".to_owned());
@@ -180,7 +178,7 @@ async fn card_png(
 
     let mut data = vec![0; img.width() * img.height() * 4];
     target.copy_raw_pixels(ImageFormat::RgbaPremul, &mut data).unwrap();
-    piet::util::unpremultiply_rgba(&mut data);
+    piet_common::util::unpremultiply_rgba(&mut data);
     let mut encoder = png::Encoder::new(&mut cursor, img.width() as u32, img.height() as u32);
     encoder.set_color(ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
