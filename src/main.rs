@@ -1,8 +1,13 @@
+mod lanyard;
+
+use lanyard::get_user;
+use lanyard::user::DiscordUser;
+
+use anyhow::{Result, Error};
 use png::ColorType;
 use axum::response::Response;
 use std::io::Cursor;
 use axum::response::IntoResponse;
-use axum::body::Body;
 use axum::extract::State;
 use piet_common::ImageBuf;
 use piet_common::RenderContext;
@@ -10,11 +15,9 @@ use piet_common::ImageFormat;
 use piet_common::InterpolationMode;
 use axum::routing::get;
 use axum::Router;
-use std::collections::HashMap;
 use axum::extract::Path;
-use axum::http::{StatusCode, header, HeaderName};
+use axum::http::{StatusCode, header};
 use reqwest;
-use serde::Deserialize;
 use tokio;
 use std::env;
 use piet_common::kurbo::Rect;
@@ -36,6 +39,30 @@ impl Default for Config {
     }
 }
 
+#[derive(Clone)]
+struct Endpoints {
+    discord_avatar: String,
+    lanyard_user: String,
+}
+
+
+impl Endpoints {
+    fn load(cfg: Config) -> Self {
+        Self {
+            discord_avatar: format!("{}/avatars", cfg.discord_cdn),
+            lanyard_user: format!("{}/users", cfg.lanyard_api),
+        }
+    }
+
+    fn avatar(&self, id: String, hash: String, ext: &'static str, size: u64) -> String {
+        format!("{}/{}/{}.{}?size={}", self.discord_avatar, id, hash, ext, size)
+    }
+
+    fn lanyard(&self, id: String) -> String {
+        format!("{}/{}", self.lanyard_user, id)
+    }
+}
+
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -44,10 +71,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = format!("{}:{}", host, port);
 
     let config = Config::default();
+    let endpoints = Endpoints::load(config);
 
     let app = Router::new()
         .route("/{id}", get(card_png))
-        .with_state(config);
+        .with_state(endpoints);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
@@ -55,120 +83,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[derive(Deserialize, Debug)]
-struct User {
-    data: Option<UserData>,
-}
 
-#[derive(Deserialize, Debug)]
-struct Timestamp {
-    start: Option<u64>,
-    end: Option<u64>,
-}
+async fn get_img(endpoint: String) -> Result<ImageBuf> {
+    let avatar = reqwest::get(endpoint)
+        .await?
+        .bytes()
+        .await?;
 
-#[derive(Deserialize, Debug)]
-struct Spotify {
-    track_id: String,
-    timestamps: Timestamp,
-    song: String,
-    artist: String,
-    album_art_url: String,
-    album: String,
-}
+    let buf = ImageBuf::from_data(&avatar)
+        .map_err(Error::from_boxed)?;
 
-#[derive(Deserialize, Debug)]
-struct DiscordUser {
-    username: String,
-    avatar: String,
-    global_name: String,
+    Ok(buf)
 }
-
-#[derive(Deserialize, Debug)]
-struct Emoji {
-    name: String,
-    id: Option<String>,
-    #[serde(default)]
-    animated: bool,
-}
-
-#[derive(Deserialize, Debug)]
-struct Assets {
-    large_image: Option<String>,
-    large_text: Option<String>,
-    small_image: Option<String>,
-    small_text: Option<String>,
-}
-
-#[derive(Deserialize, Debug)]
-struct Activity {
-    name: String,
-    r#type: u8,
-    created_at: u64,
-    timestamps: Option<Timestamp>,
-    #[serde(default)]
-    application_id: String,
-    #[serde(default)]
-    details: String,
-    #[serde(default)]
-    state: String,
-    emoji: Option<Emoji>,
-    assets: Option<Assets>,
-}
-
-#[derive(Deserialize, Debug)]
-struct UserData {
-    active_on_discord_web: bool,
-    active_on_discord_mobile: bool,
-    active_on_discord_desktop: bool,
-    active_on_discord_embedded: bool,
-    active_on_discord_vr: bool,
-    listening_to_spotify: bool,
-    kv: HashMap<String, String>,
-    spotify: Option<Spotify>,
-    discord_user: DiscordUser,
-    #[serde(default)]
-    discord_status: String,
-    activities: Vec<Activity>,
-}
-
 
 async fn card_png(
-    cfg: State<Config>,
+    edp: State<Endpoints>,
     Path(id): Path<String>
 ) -> Response {
-    let user: User = reqwest::get(
-            format!("{}/users/{}", cfg.lanyard_api, id)
-        )
-        .await
-        .unwrap() // TODO error handling
-        .json()
-        .await
-        .unwrap();
+    
+    let user = get_user(edp.lanyard(id.clone())).await.unwrap();
 
     let Some(user) = user.data else {
         return (StatusCode::NOT_FOUND).into_response();
     };
 
-    let DiscordUser {
-        username,
-        avatar,
-        global_name
-    } = user.discord_user;
+    let DiscordUser { avatar, .. } = user.discord_user;
 
-    let avatar = reqwest::get(
-            format!("{}/avatars/{}/{}.webp?size=64", cfg.discord_cdn, id, avatar)
-        )
-        .await
-        .unwrap()
-        .bytes()
-        .await
-        .unwrap();
+    let buf = get_img(edp.avatar(id, avatar, "webp", 1024)).await.unwrap();
 
     let mut device = Device::new().unwrap();
     let mut target = device.bitmap_target(1024, 1024, 1.0).unwrap();
     let mut ctx = target.render_context();
 
-    let buf = ImageBuf::from_data(&avatar).unwrap();
     let img = buf.to_image(&mut ctx);
     ctx.draw_image(&img, Rect::new(0.0, 0.0, 1024.0, 1024.0), InterpolationMode::Bilinear);
     

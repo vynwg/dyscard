@@ -31,3 +31,4 @@ features = ["rustls", "json"]
 [dependencies]
 png = "0.18.1"
 bytes = "1.11.1"
+anyhow = "1.0.102"
